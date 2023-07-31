@@ -29,9 +29,6 @@ contract StableCoin is Ownable , ERC20Burnable {
     error DecentralizedStableCoin__BurnAmountExceedsBalance();
     error DecentralizedStableCoin__NotZeroAddress();
 
-
-
-
     // initiilizing erc20 token in constructor
     constructor() ERC20("StbaleCoin","sUSD"){}
 
@@ -60,5 +57,5 @@ contract StableCoin is Ownable , ERC20Burnable {
         return true;
     }
 }
-    
+
 
