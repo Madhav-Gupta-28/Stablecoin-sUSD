@@ -29,7 +29,6 @@ contract sUSDEngine is ReentrancyGuard {
      */
 
     StableCoin private immutable i_uSUD;
-    AggregatorV3Interface internal dataFeed;
 
 
        /**
@@ -42,6 +41,7 @@ contract sUSDEngine is ReentrancyGuard {
     address[] public  s_collateralTokens; // keeping track of all accepted  token address of collateral 
     mapping(address user => mapping(address collateralToken => uint256 amount)) public userToCollateralDeposited ; // amount of and token deposit by user 
     mapping(address user => uint256 amount) public userToSUSDAmount; // amount of sUSD minted by user
+    uint256 private constant LIQUIDATION_THRESHOLD = 50 ; // 50% of collateral value
 
     /**
      * Errors 
@@ -52,6 +52,7 @@ contract sUSDEngine is ReentrancyGuard {
     error LenghtOfTokenAndPriceFeedArrayNotMatches();
     error sUSD_DepositCollateralFailed();
     error sUSD_MintingFailed();
+    error HEALTH_FACTOR_IS_LESS_THAN_ONE(uint256 healthFactor);
 
     /**
      * Modifiers
@@ -94,14 +95,19 @@ contract sUSDEngine is ReentrancyGuard {
             s_collateralTokens.push(tokenAddress[i]);
         }
         i_uSUD = StableCoin(sUSDAddress);
-
-        dataFeed = AggregatorV3Interface(
-            0x694AA1769357215DE4FAC081bf1f309aDC325306
-        );
-
     }
 
-    function depositCollateralAndMintsUSD() external {}
+
+    /**
+     * @param tokenCollateralAddress The address of token user wants to deposit
+     * @param amountOfCollateral Amount of it
+     * @param amountToMint  Amount of sUSD to mint
+     * @notice It is Simply calling other two functions and Just Acting as a wrapper
+     */
+    function depositCollateralAndMintsUSD(address tokenCollateralAddress , uint256 amountOfCollateral , uint256 amountToMint) external {
+        depositCollateral( tokenCollateralAddress ,  amountOfCollateral);
+        mintsUSD(amountToMint);
+    }
 
 
 
@@ -112,7 +118,7 @@ contract sUSDEngine is ReentrancyGuard {
     function depositCollateral(address tokenCollateralAddress , uint256 amountOfCollateral) 
     amountMorethanZero(amountOfCollateral)
     isAllowedToken(tokenCollateralAddress)
-     external 
+     public 
      nonReentrant
      {
 
@@ -127,8 +133,10 @@ contract sUSDEngine is ReentrancyGuard {
 
     /**
      * @notice Mints sUSD tokens
+     * @param amountTomint Amount of sUSD to mint
+     * @notice Checks the Health Factor First Before Minting the sUSD
      */
-    function mintsUSD(uint256 amountTomint) external amountMorethanZero(1) nonReentrant {
+    function mintsUSD(uint256 amountTomint) public  amountMorethanZero(1) nonReentrant {
 
         userToSUSDAmount[msg.sender] += amountTomint;
         revertIfHealthFactorIsBad(msg.sender);
@@ -153,10 +161,18 @@ contract sUSDEngine is ReentrancyGuard {
     /////////////////////////////////////////// 
     // Private Or Internal View  Functions // 
     //////////////////////////////////////////
+
+
+
+
     /**
      * @notice Get the latest price of ETH / USD
+     * @return Returns the latest value of collateral(which is in ETH) in terms of USD
      */
-    function getLatestData() internal  view returns (int) {
+    function getLatestData(uint256 collateral) private   view returns (int) {
+        AggregatorV3Interface datafeed = AggregatorV3Interface(
+            0x694AA1769357215DE4FAC081bf1f309aDC325306
+        );
     // prettier-ignore
     (
         /* uint80 roundID */,
@@ -164,32 +180,67 @@ contract sUSDEngine is ReentrancyGuard {
         /*uint startedAt*/,
         /*uint timeStamp*/,
         /*uint80 answeredInRound*/
-    ) = dataFeed.latestRoundData();
+    ) = datafeed.latestRoundData();
 
     // Convert the raw value to USD with 8 decimal places
-    uint8 decimals = 8;
-    uint256 priceInUSD = uint256(answer) / (10**uint256(decimals));
+    uint256 priceInUSD = (((uint256(answer) * 1e10 ) * collateral) / 1e18);
 
     // Round down to the nearest integer (1824)
     return int(priceInUSD);
 }   
 
     /**
+     * 
+     * @param user user address
+     * @param totalsUSDMinted total sUSD minted by user
+     * @param collateralValue collateral value of user 
+     * @return totalsUSDMinted , collateralValue 
+     */
+    function _getUserInfo(address user) private view returns(uint256 totalsUSDMinted , uint256 collateralValue ) {
+        totalsUSDMinted = userToSUSDAmount[user];
+
+        for (uint256 i = 0; i < s_collateralTokens.length; i++) {
+            address token = s_collateralTokens[i];
+            uint256 amount = userToCollateralDeposited[user][token];
+            uint256 price = uint256(getLatestData(userToCollateralDeposited[user][token]));
+            collateralValue += amount * price;
+        }
+        return (totalsUSDMinted , collateralValue);
+    }
+
+    /**
      * @param user  user address 
      * @return Returns the health factor of user. If it is below certain level.... liquidate user 
      */
     function getHealthfactor(address user ) private  view returns(uint256) {
+            (uint256 totalsUSDMinted , uint256 collateralValueInUSD) = _getUserInfo(user);
+            return calculateHealthFactor(totalsUSDMinted, collateralValueInUSD);
+    }
 
-
-
+    /**
+     * 
+     * @param totalsUSDMinted Passing uSUD Minted as arg
+     * @param collateralValueInUSD Passing Colateral Value in Usd  as arg
+     */
+    function calculateHealthFactor(uint256 totalsUSDMinted , uint256 collateralValueInUSD) internal pure returns(uint256) {
+             if (totalsUSDMinted == 0) return type(uint256).max;
+        uint256 collateralAdjustedForThreshold = (collateralValueInUSD * LIQUIDATION_THRESHOLD) / 100;
+        return (collateralAdjustedForThreshold * 1e18) / totalsUSDMinted;
     }
     
+    /**
+     * @param user user address
+     * @notice Reverts if health factor is less than 1
+     */
     function revertIfHealthFactorIsBad(address user) internal view {
         uint256 healthFactor = getHealthfactor(user);
-        if(healthFactor < 1){
-            revert("Health Factor is less than 1");
+        if(healthFactor < 1){ // 1 is Minimum Health Factor
+            revert HEALTH_FACTOR_IS_LESS_THAN_ONE(healthFactor);
         }
     }
+
+
+
 
 
 }
